@@ -1,0 +1,141 @@
+---
+title: "HW2 Solution"
+author: "Yichen"
+date: "5/11/2020"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(Matrix)
+install.packages('KernSmooth')
+library(KernSmooth)
+library(splines)
+```
+
+## R Markdown
+
+
+```{r}
+# QUESTION 1
+set.seed(100)
+cv.nw <- function(x, y, kern = "box", K = 2,
+                  seq.h = seq(0.1, 1, length = 100),
+                  random.folds = FALSE, plots = FALSE) { 
+  # This function implements a K-fold cross validation
+  # for the NW estimator.
+  # The default is K = n, or leave-one-out CV. n <- length(x)
+  folds <- cut(1:n, breaks = K, labels=FALSE) 
+  if(random.folds) { # use random folds.
+    folds <- sample(folds)
+  } # To randomly asign elements to a fold
+  
+  mse <- matrix(0, ncol = length(seq.h), nrow = K)
+  
+  for(i in 1:K) {
+    x.train <- x[folds!=i] 
+    y.train <- y[folds!=i] 
+    x.test <- x[folds==i] 
+    y.test <- y[folds==i] 
+    mse[i,] <- sapply(seq.h, 
+                      FUN = function(h.val) {
+                        fit.y <- ksmooth(x.train, y.train, kernel = kern,
+                                         bandwidth = h.val, x.points = x.test)
+                        mean((fit.y$y - y.test[order(x.test)])^2, na.rm = TRUE) 
+                      } 
+    )
+  }
+  
+  mean.cv.mse <- colMeans(mse, na.rm = TRUE) 
+  h.opt <- seq.h[which.min(mean.cv.mse)]
+  if(plots) {
+    par(mfrow = c(1,2))
+    plot(seq.h, mean.cv.mse, xlab = "h", ylab = "CV Error")
+    abline(v = h.opt, col = "red", lwd = 2)
+    plot(x,y, xlab = "x", ylab ="y")
+    xs <- seq(min(x), max(x), length = 1e+3)
+    lines(xs, kernel.smoother(x, y, kern=kern, h = h.opt, xout = xs), col = "blue", lwd = 3)
+    par(mfrow = c(1, 1))
+  }
+  return(h.opt) 
+}
+
+n <- 100
+x <- sort(runif(n, -1, 1))
+fs <- list(fa = function(x){sin(pi*x)},
+           fb = function(x){2*x + 3*x^2 - 6*x^4},
+           fc = function(x){1/(1 + (5*x)^2)}) 
+Ks <- c(2, 5, 10)
+box.h <- matrix(NA, nrow = 3, ncol = 3) 
+colnames(box.h) <- c("Scen. a", "Scen. b", "Scen. c") 
+rownames(box.h) <- c("K = 2", "K = 5", "K = 10") 
+box.fit <- array(NA, dim = c(3, 3, n))
+gauss.h <- matrix(NA, nrow = 3, ncol = 3) 
+colnames(gauss.h) <- c("Scen. a", "Scen. b", "Scen. c") 
+rownames(gauss.h) <- c("K = 2", "K = 5", "K = 10") 
+gauss.fit <- array(NA, dim = c(3, 3, n))
+
+for(t in 1:length(fs)) {
+  f <- fs[[t]]
+  y <- f(x) + rnorm(n)
+  box.h[,t] <- sapply(c(2, 5, 10),
+                      function(k){cv.nw(x, y, "box", K = k, random.folds = FALSE,
+                                        plots = FALSE)})
+  gauss.h[,t] <- sapply(c(2, 5, 10),
+                        function(k){cv.nw(x, y, "normal", K = k,
+                                          random.folds = FALSE,
+                                          plots = FALSE)})
+  for(s in 1:length(Ks)) {
+    box.fit[s,t,] <- ksmooth(x, y, "box", box.h[s,t])$y
+    gauss.fit[s,t,] <- ksmooth(x, y, "norm", gauss.h[s,t])$y }
+}
+
+simulation <- function(x, y, no.reps = 100, f = function(x){sin(pi * x)}) {
+  fx <- f(x)
+  hs <- seq(0.1, 1, length = 100)
+  # First, use Gaussian kernel
+  h.opt1 <- replicate(no.reps, cv.nw(x, y, kern = "normal", K = 2, seq.h = hs, plots = FALSE,
+                                     random.folds = TRUE))
+  h.opt2 <- replicate(no.reps, cv.nw(x, y, kern = "normal", K = 5,
+                                     seq.h = hs, plots = FALSE,
+                                     random.folds = TRUE))
+  h.opt3 <- replicate(no.reps, cv.nw(x, y, kern = "normal", K = 10,
+                                     seq.h = hs, plots = FALSE,
+                                     random.folds = TRUE))
+  # Oracle bandwidth.
+  fhats.gauss <- sapply(hs,
+                        FUN = function(h){
+                          ksmooth(x, y, kernel = "normal", bandwidth = h)$y}
+  )
+  
+  box.oracle <- hs[which.min(colMeans((fhats.gauss - fx)^2))] 
+  gauss.res <- cbind(h.opt1, h.opt2, h.opt3)
+  # Then using box kernel.
+  h.opt1 <- replicate(no.reps, cv.nw(x, y, kern = "box", K = 2, seq.h = hs, plots = FALSE, random.folds = TRUE)) 
+  h.opt2 <- replicate(no.reps, cv.nw(x, y, kern = "box", K = 5, seq.h = hs, plots = FALSE, random.folds = TRUE))
+  h.opt3 <- replicate(no.reps, cv.nw(x, y, kern = "box", K = 10,seq.h = hs, plots = FALSE, random.folds = TRUE))
+  
+  # Oracle bandwidth.
+  fhats.box <- sapply(hs, FUN = function(h){ksmooth(x, y, kernel = "box", bandwidth = h)$y })
+  gauss.oracle <- hs[which.min(colMeans((fhats.box - fx)^2))] 
+  box.res <- cbind(h.opt1, h.opt2, h.opt3)
+  out <- list(box.res = box.res, gauss.res = gauss.res,
+              box.oracle = box.oracle,
+              gauss.oracle = gauss.oracle) 
+  return(out)
+}
+```
+
+## Including Plots
+```{r, echo=FALSE}
+x <- sort(runif(n, -1, 1))
+ya <- fs[[1]](x) + rnorm(n)
+yb <- fs[[2]](x) + rnorm(n)
+yc <- fs[[3]](x) + rnorm(n)
+scen.a <- simulation(x, ya, no.reps = 100, f = fs[[1]]) 
+scen.b <- simulation(x, ya, no.reps = 100, f = fs[[2]]) 
+scen.c <- simulation(x, ya, no.reps = 100, f = fs[[3]])
+```
+
+
+

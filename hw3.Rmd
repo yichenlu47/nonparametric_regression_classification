@@ -1,0 +1,186 @@
+---
+title: "BIOST 527 HW3"
+author: "Yichen"
+date: "5/11/2020"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(eval = TRUE, warning = FALSE)
+library(Matrix)
+library(KernSmooth)
+library(splines)
+library(ggplot2)
+library(dplyr)
+```
+
+
+# Question 1(b)
+```{r, echo = FALSE}
+rm(list = ls())
+
+n = 100
+
+i = seq(1, 100, 1)
+x = i/n
+sigma = 0.2
+
+haha <- function(x0, k){
+  if (k == 0) e1 = matrix(1) #nw
+  else e1 = matrix(c(1,rep(0, k))) #dim = 1 * k
+  
+  # kernel <- ( 1/ ( sigma * sqrt(2 * pi) ) ) * exp( - (x-x0)^2 / (2 * (sigma^2) ))
+  kernel <- ( 1/ (sqrt(2 * pi) ) ) * exp( - ((x-x0)/sigma)^2 /2)
+  
+  w = diag(kernel) #dim = 100 * 100
+  
+  if (k == 0) z = cbind(rep(1, n)) #dim = 100 * 1
+  else if (k == 1) z = cbind(rep(1, n), (x - x0)/sigma) #dim = 100 * 2
+  else z = cbind(rep(1, n), (x - x0)/sigma, ((x - x0)/sigma)^2) #dim = 100 * 3
+  
+  s = t(e1) %*% solve (t(z) %*% w %*% z) %*% t(z) %*% w 
+  return (t(s))
+}
+```
+
+```{r}
+par(mfrow=c(1,3))
+
+plot(x, haha(0.1, 1), main = "sx0 vs x for k = 1 \n at x0 = 0.1", ylab = "sx0")
+plot(x, haha(0.5, 1), main = "sx0 vs x for k = 1 \n at x0 = 0.5", ylab = "sx0")
+plot(x, haha(0.9, 1), main = "sx0 vs x for k = 1 \n at x0 = 0.9", ylab = "sx0")
+
+plot(x, haha(0.1, 2), main = "sx0 vs x for k = 2 \n at x0 = 0.1", ylab = "sx0")
+plot(x, haha(0.5, 2), main = "sx0 vs x for k = 2 \n at x0 = 0.5", ylab = "sx0")
+plot(x, haha(0.9, 2), main = "sx0 vs x for k = 2 \n at x0 = 0.9", ylab = "sx0")
+
+plot(x, haha(0.1, 0), main = "NW coefficient for x \n at x0 = 0.1", ylab = "coef")
+plot(x, haha(0.5, 0), main = "NW coefficient for x \n at x0 = 0.5", ylab = "coef")
+plot(x, haha(0.9, 0), main = "NW coefficient for x \n at x0 = 0.9", ylab = "coef")
+```
+
+Since we are able to plot $s_{x0}$ against $x$ in a two dimensional space, it shows that local polynomial regression of order k is a linear estimator.
+
+Based on the above scattorplots of $s_{x0}$ from the local polynomial regression estimator with $k = 1$, $k = 2$ gaussian kernels and coefficient of Nadaraya Watson estimator with a Gaussian kernel, we observe that as $x$ gets farther away from $x0$, it gets assigned smaller weights. The maximum weight is assigned to $x$ at $x_0$.
+
+For local polynomial regression estimator, it seems like with larger $k$, the weight for $x$ at $x_0$ is also larger. Compared to Nadaraya Watson estimator with a Gaussian kernel, weight drops to close to 0 faster with local polynomial estimator. For example, $x_0 = 0.5$, the drops in weight of NW estimator happens around $0.6$, while for polynomial, it happens around $0.4$.
+
+
+
+# Question 2
+```{r, echo = FALSE}
+rm(list = ls())
+
+set.seed(100)
+K = 5
+seq.h <- seq(0.1, 1, length = 100)
+seq.df <- seq(1, 100, length = 100)
+
+n <- 100
+xx <- sort(runif(n, -1, 1))
+fs <- list(fa = function(x){sin(pi*x)},
+           fb = function(x){2*x+ 3*x^2 - 6*x^4},
+           fc = function(x){1/(1 + (5*x)^2)}) 
+
+fa <- fs[[1]](xx)
+fb <- fs[[2]](xx)
+fc <- fs[[3]](xx)
+
+ya <- fa + rnorm(n)
+yb <- fb + rnorm(n)
+yc <- fc + rnorm(n)
+
+
+cv <- function(xx, yy) { 
+
+  folds <- sample(cut(1:n, breaks = K, labels=FALSE))
+  mse.nw <- mse.poly <- mse.sp <- matrix(0, ncol = length(seq.h), nrow = K)
+  for(i in 1:K) {
+
+    x.train <- xx[folds!=i] 
+    y.train <- yy[folds!=i] 
+    x.test <- xx[folds==i] 
+    y.test <- yy[folds==i] 
+    
+    # Nadaraya-Watson estimator with a “gaussian” kernel
+    mse.nw[i,] <- sapply(seq.h, function(h.val) {
+      fit.y <- ksmooth(x.train, y.train, kernel = "normal", bandwidth = h.val, x.points = x.test)
+      mean((fit.y$y - y.test[order(x.test)])^2) 
+    })
+    
+    # Local Polynomial estimator of degree 2 and with a “gaussian” kernel
+    mse.poly[i,] <- sapply(seq.h, function(h.val) {
+      fit.y.1 <- locpoly(x.train, y.train, kernel = "normal", bandwidth = h.val, degree = 2)
+      fit.y.2 <- approxfun(fit.y.1$x, fit.y.1$y)
+      fit.y <- fit.y.2(x.test)
+      mean((fit.y - y.test[order(x.test)])^2) 
+    })
+    
+    # cubic B-spline (degree 3) regression
+    mse.sp[i,] <- sapply(seq.df, function(df.val) {
+      mod <- lm(y.train~ns(x.train, df=df.val, knots=NULL))
+      x.test <- data.frame(x.test) %>% mutate(x.train = x.test) %>% select(-x.test) #rename
+      fit.y <- predict(mod, newdata = data.frame(x.test))
+      mean((fit.y - y.test[order(x.test)])^2)
+    })
+  }
+  
+  mean.cv.mse.nw <- colMeans(mse.nw, na.rm = TRUE) 
+  mean.cv.mse.poly <- colMeans(mse.poly, na.rm = TRUE) 
+  mean.cv.mse.sp <- colMeans(mse.sp, na.rm = TRUE)  
+  
+  h.opt.nw <- seq.h[which.min(mean.cv.mse.nw)]
+  h.opt.poly <- seq.h[which.min(mean.cv.mse.poly)]
+  h.opt.sp <- seq.df[which.min(mean.cv.mse.sp)]
+  return(list(h.opt.nw, h.opt.poly, h.opt.sp)) 
+}
+
+
+# organize data for plots
+plot.data <- function(yy, ff){
+  hh <- cv(xx, yy)
+  res.0 <- res.nw <- res.poly <- res.sp <- c()
+  res.0$x <- res.nw$x <- res.poly$x <- res.sp$x <- xx
+  
+  res.0$y <- ff
+  res.0$type <- "Unknown function f(x)"
+  
+  res.nw$y <- ksmooth(xx, yy, kernel = "normal", bandwidth = hh[[1]])$y
+  res.nw$type <- "Nadaraya-Watson with a 'gaussian' kernel"
+  
+  ya.poly.1 <- locpoly(xx, yy, kernel = "normal", bandwidth = hh[[2]], degree = 2)
+  ya.poly.2 <- approxfun(ya.poly.1$x, ya.poly.1$y)
+  res.poly$y <- ya.poly.2(xx)
+  res.poly$type <- "Local Polynomial of degree 2"
+  
+  res.sp$y <- lm(yy~ns(xx, df=hh[[3]], knots=NULL))$fitted.values
+  res.sp$type <- "Natural cubic B-spline"
+  
+  rbind(as.data.frame(res.0), as.data.frame(res.nw), as.data.frame(res.poly), as.data.frame(res.sp))
+}
+res.a <- plot.data(ya, fa)
+res.b <- plot.data(yb, fb)
+res.c <- plot.data(yc, fc)
+```
+
+```{r}
+ggplot(data = res.a, aes(x=x, y=y, color = type)) + geom_line() + 
+  labs(title = "Fitting estimators on data from function (a)", y="y", x = "x", 
+       color = "Type of estimators")
+
+ggplot(data = res.b, aes(x=x, y=y, color = type)) + geom_line() + 
+  labs(title = "Fitting estimators on data from function (b)", y="y", x = "x", 
+       color = "Type of estimators")
+
+ggplot(data = res.c, aes(x=x, y=y, color = type)) + geom_line() + 
+  labs(title = "Fitting estimators on data from function (c)", y="y", x = "x", 
+       color = "Type of estimators")
+```
+
+Based on the above plots, we see that the optimal bandwidth for Nadaraya Watson with a gaussian kernel and local polynomial of degree 2, and the number of breakpoints for natural cubic B spline are chosen using a 5 fold CV.
+
+For function (a), the best overall methods were the natural cubic B spline. As stated in HW1, this can be explained by the fact that the function (a) is well approximated by a polynomial of degree 3 or higher on the interval between $-1$ and $1$.The local polynomial estimator of degree 2 also performs well. 
+
+For function (b), we note that Nadaraya Watson with a gaussian kernel performs the best. Local polynomial of degree 2 and natural cubic B spline perform similarly but fail to capture the two peaks in the curve of $f(x)$. However, none of the three estimators does a good job at the two boundaries of x. 
+
+For function (c), none of the three estimators perform well but among those, polynomial of degree 2 and natural cubic B spline do better compared to Nadaraya Watson with a gaussian kernel.

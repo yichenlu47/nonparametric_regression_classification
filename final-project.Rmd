@@ -1,0 +1,455 @@
+---
+title: "BIOST 527 Final project: Regression tree"
+author: "Yichen Lu"
+date: "6/2020"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, fig.align="center", eval=TRUE, echo = FALSE, cache = TRUE)
+library(tree)
+library(glmnet)
+library(regpro)
+library(splines)
+library(KernSmooth)
+library(ggplot2)
+library(rpart)
+library(rpart.plot)
+library(caret)
+```
+
+## 1 Introduction
+Throughout this quarter, we have studied many non-parametric estimators in class. In this report, another non-parametric method for predicting continuous outcome will be introduced: *regression tree*.
+
+In this section, we will get familiar with the intuition behind the model. A sample of $n = 100$ observations with $(X_i, y_i)$ where $X_i = (x_{i1}, x_{i2})$ is generated as follows:
+
+$$x_1 \stackrel{i.i.d.}\sim N(10, 5)$$
+$$x_2 \stackrel{i.i.d.}\sim Uniform(0, 10)$$
+$$f(x_1, x_2) = 5 x_1 + x_2 ^ 2$$
+$$y = f(x_1, x_2) + \epsilon, \epsilon \stackrel{i.i.d.}\sim Normal(0, 1)$$
+
+
+A regression tree is fitted to these observations and **Graph 1a** and **Graph 1b** present two ways of visualizing the result. Without much instruction, the audience can easily figure out how to model $y$ for an observation.
+
+**Graph 1a** closely mimics the structure of a tree. The single node at the top is the *root* of the tree and the $7$ nodes at the bottom level are usually referred to as *terminal nodes* or *leaves*. To find the fitted $y$ value for observation $i$, we simply start from the root and compare $x_{i2}$ to $5.87$. We follow the left branch if $x_{i2} < 5.87$ or proceed to the right if $x_{i2} \geqslant 5.87$. Then we continue comparing $x_{i1}$ or $x_{i2}$ to the splitting criterion at each *internal node* until we reach the leaves with the fitted values.
+
+**Graph 1b** projects the $100$ observations to a $2$-dimensional graph where $x_1$ and $x_2$ are the x-axis and y-axis respectively. The shade of grey of the dots indicates the size of the corresponding $y$ value . We first find the the horizontal line that divides the entire sample into two parts at $x_2 = 5.87$. This corresponds to the first splitting criterion after the root in **Graph 1a**. Upon deciding on which rectangle to move into, we keep finding the lines that splits the current space into half, and stop when we land in a space with no more split (terminal nodes). Compared to **Graph 1a**, visualization illustrated by **Graph 1b** is less flexible since it can not accommodate higher-dimensional problems.
+
+**Graph 1a: Visualization of regression tree model in tree shape**
+
+```{r}
+rm(list = ls())
+set.seed(47)
+x1 <- rnorm(100, 10, 5)
+x2 <- runif(100, 0, 10)
+y = 5 * x1 + x2 ^ 2 + rnorm(100, 0, 1)
+mod <- tree(y ~ x1 + x2, control = tree.control(nobs = 100, mincut = 10))
+
+y.deciles = quantile(y,0:10/10)
+cut.y = cut(y,y.deciles,include.lowest=TRUE)
+
+par(mfrow=c(1,1)) 
+plot(mod)
+text(mod, cex=0.75, digits = getOption("digits") - 4)
+# mtext("Graph 1a: Regression tree visualization", side = 3, font = 2, cex = 1.2, line = 1)
+```
+
+**Graph 1b: Visualization of regression tree model using rectangles**
+
+```{r}
+plot(x1, x2, col=grey(10:2/11)[cut.y], pch=20, xlab="x1",ylab="x2", cex = 1.2)
+partition.tree(mod, label = "yval", ordvars=c("x1","x2"), add=TRUE, cex = 0.8)
+```
+
+The simplicity and straightforwardness of **Graph 1a** and **Graph 1b** explains why regression tree has become a popular method: the model is easy-to-understand and it is fast to find the estimated value of $y$. One can clearly explain the structure of the model to the audience regardless of their statistical background.
+
+## 2 Mathematical notation
+In this section, we formally describe the regression tree model in statistical terms. 
+
+Assume we have $n$ observations $(X_i, y_i)$ such that $X_i \in {\rm I\!R}_p$ and $X_i = (x_{i1}, x_{i2}, ... x_{ip})$. The regression tree partitions them into $M$ non-overlapping regions $R_1, R_2, ...R_M$ as illustrated in **Graph 1b**. These regions are equivalent to the *terminal notes*. The number of observations that get partitioned into region $R_m$ can be summarized with $N_m = \sum_{i = 1}^{n} I(X_i \in R_m)$.
+
+Similar to other estimators, the goal of the regression tree is also to minimize the difference between the fitted $y$ values and the observed $y$ values, which can be measured by residual sum of square *RSS*:
+$$RSS = \sum_{i = 1}^{n} (y_i - \hat{y_i})^2$$
+This is similar to minimizing the *training error* $\frac{1}{n} \sum_{i = 1}^{n} (y_i - \hat{y_i})^2$ that we have learned in class, which is an empirical version for $MSE = E[(f(x) - \hat{f}(x))^2]$ because we don't have the entire data distribution to calculate the expectation in the *MSE*. 
+
+We can consider every possible tree with different number of nodes and different ways of branching, and find the one that gives the lowest *RSS*. However, this approach is computationally taxing and can quickly become infeasible if we increase sample size or move into high-dimensional space for $X$. Therefore, regression trees adopts a binary splitting, top-down greedy approach. We begin with the root of the tree and divide the data into *two* regions $R_1$ and $R_2$, which correspond to the *internal nodes* in the tree structure.
+
+To determine the splitting criterion, we consider all $x_1$ to $x_p$ and possible cut point $s$, such that we find the pair of $j$ and $s$ that gives us the smallest $RSS$:
+
+$$RSS = \sum_{x_i \in R_{1}} (y_i - \hat{y_i})^ 2 + \sum_{x_i \in R_{2}} (y_i - \hat{y_i})^ 2$$
+
+We then apply the same strategy to $R_1$ and $R_2$ and continue splitting our observations in these two nodes into four nodes. We do so *recursively* until we reach the terminal nodes that gives us the *RSS* we are satisfied with. 
+
+We can always build a regression tree with only one data point in each terminal nodes (number of terminal nodes $=$ sample size). This method has its drawback and will be discussed later. By being greedy and requesting the local minimal *RSS* at each split, building the tree becomes much faster with the compromise that the tree may not land at the global minimal *RSS*.
+
+One remaining component of the formula is to find the fitted value $\hat{y_i}$. For observations $X_i \in R_m$, the regression tree models their $y$ with a constant number $c_m$. Regression tree then models the entire sample with $M$ constant values: $c_1, c_2,... c_M$. The model is then a piecewise constant model, which makes it fast to model the response variable $y_i$ for observation $i$:
+$$\hat{y_i} = \sum_{m = 1}^{M} c_m I(x_i \in R_m)$$
+
+Given this property, we can rewrite the *RSS* at each binary split into two new nodes $R_1$ and $R_2$ as:
+$$RSS = \sum_{x_i \in R_{1}} (y_i - c_1)^ 2 + \sum_{x_i \in R_{2}} (y_i - c_2)^ 2$$
+
+and the overall $RSS$ for the regression tree will be:
+$$RSS = \sum_{m = 1}^{M} \sum_{x_i \in R_{m}} (y_i - c_m)^ 2$$
+To minimize *RSS* with constant $c_{m}$, it makes the most sense to have $c_{m}$ take the average value of $y$ among observations $X_i \in R_m$. Thus, we have:
+$$\hat{c}_{m}= \frac{1}{N_m} \sum_{x_i \in R_{m}}y_i$$
+Some extensions of the regression tree model may allow for using a linear combination of $x_i$ in the form of $\sum \beta_j x_j < s$ as the splitting criterion (e.g. $x_{i1} + 2x_{i2} < 5.87$). The model can also use other modeling technique inside the terminal nodes instead of a constant number to model the $y$ value. For this report, we focus on the simple version of binary regression as described earlier in this section.
+
+### 2.1 Simulation in 1-dimensional space
+To evaluate the performance of regression tree, a simulation study is conducted following the regular set-up in the homework. Regression tree is compared to other parametric or non-parametric estimators that we have learned in class. 
+
+The first simulation example uses $x \in {\rm I\!R}_1$. $n = 100$ observations are generated with $x \stackrel{i.i.d.}\sim Uniform (-1, 1)$, and
+$$y_i = f(x_i) + \epsilon_i$$
+for $i = 1, 2, ..., n$ where $\epsilon_i \sim N(0, 1)$.
+
+In different scenarios, $f(x)$ is constructed as follows:
+
+$$(a) \ f(x) = 2x $$
+$$(b) \ f(x) = sin (x * \pi)$$
+$$(c) \ f(x) = 2x + x^3 - 6x^4$$
+$$(d) \ f(x) = \frac{1}{1 + (5x)^2}$$
+
+Estimators for comparison include simple linear regression, parametric polynomial regression model with degree of $5$, and Nadaraya-Watson with a 'gaussian' kernel with bandwidth $0.4$. **Graph 2a** uses boxplots to show the performance of each estimator in terms of the empirical *MSE*: $$\hat{MSE} = \frac{1}{n}\sum_{i=1}^{n} (f(x_i) - \hat{y}_i)^2$$
+
+The simulation study is replicated $100$ times to get a more stable estimate of $\hat{MSE}$ as well as to check the variance of the estimator. In all four scenarios, the red boxplot represents the regression tree estimator and we see that it does not have a satisfying performance. It is understandable that it fails to outperform the two parametric estimators: linear regression or polynomial regression in the first three scenarios *a* to *c* because the underlying relationship $f(x)$ is either linear or polynomial. In secnario *d*, $f(x)$ is rather complicated that it can not be easily approximated by the parametric models while the non-parametric estimator Nadaraya-Watson with a 'gaussian' kernel is able to capture such wiggliness. However, not only does regression tree perform worse compared to Nadaraya-Watson, its $\hat{MSE}$ is higher than that of parametric methods.
+
+**Graph 2a: regression tree vs other estimators in 1-dimensional space**
+
+```{r}
+rm(list = ls())
+set.seed(23)
+n = 100
+nsim = 100
+
+one.simu.1D <- function(scen, n){
+  # print(n); print(scen)
+  x <- sort(runif(n, -1, 1))
+  if (scen == "a") f = 2 * x
+  if (scen == "b") f = sin (pi * x)
+  if (scen == "c") f = 2*x + x^3 - 6*x^4
+  if (scen == "d") f = 1/(1 + (5*x)^2)
+  
+  y <- f + rnorm(n)
+  
+  yh0 <- predict(rpart(y~x,control = rpart.control(cp = 0)), newdata=list(x))
+  
+  yh1 <- lm(y~x)$fitted.values
+  
+  yh2 <- lm(y~poly(x,5))$fitted.values
+  
+  # fit <- locpoly(x = x, y = y, kernel = "normal", deg = 2, bandwidth = 0.1)
+  # fit2 <- approxfun(fit$x, fit$y)
+  # yh3 <- fit2(x)
+  # 
+  yh3 <- ksmooth(x, y, kernel = "normal", bandwidth = n^(-1/5))$y
+  mse <- colMeans( (cbind(yh0, yh1, yh2, yh3) - f)^2 )
+}
+
+dat <- lapply(c("a", "b", "c", "d"), function(i) {
+  all.mse <- replicate(nsim, one.simu.1D(n, scen = i)) 
+  data.frame("MSE" = as.numeric(all.mse),
+             "Method" = rep(c("Regression tree","Simple linear", "Poly Deg","NW-Gaussian"), nsim),
+             "Scenario" = paste("Scenario", i))
+})
+
+dat2 <- do.call(rbind, dat)
+dat2$"Method" <- factor(dat2$"Method", levels = c("Regression tree","Simple linear", "Poly Deg","NW-Gaussian"))
+ggplot(dat2, mapping = aes(y = MSE, color = Method)) +
+  geom_boxplot() + facet_wrap(~Scenario, scales = "free") + theme(axis.title.x = element_blank(), axis.text.x = element_blank()) + scale_y_log10()
+```
+
+### 2.2 Simulation in multi-dimensional space
+The second simulation example is based on observations with $x \in {\rm I\!R}_3$. Again, $n = 100$ observations are generated with $x_1 \stackrel{i.i.d.}\sim Uniform (0, 1)$, $x_2 \stackrel{i.i.d.} \sim Uniform (0, 1)$, and
+$x_3 \stackrel{i.i.d.}\sim Uniform (0, 1)$. 
+$$y_i = f(X_i) + \epsilon_i$$
+where $i = 1, 2, ..., n$ and $\epsilon_i \sim N(0, 1)$.
+
+The functions include:
+$$(a) \ f(x_1, x_2, x_3) = x_1 + x_2 + x_3 $$
+$$(b) \ f(x) = sin (x * \pi)$$
+$$(c) \ f(x_1, x_2, x_3) = (x_1 x_2 x_3)^{1/3}$$
+
+Estimators include regression tree, multivariate linear regression, additive model with polynomial regression and Nadaraya-Watson with a 'gaussian' kernel. The additive polynomial regression raises $x_1$, $x_2$ and $x_3$ simultaneously to degree of $2$ to $5$. The optimal polynomial degress is selected using cross-validation. The optimal bandwidth for the Nadaraya-Watson estimator is also chosen using cross-validation. 
+
+**Graph 2b** shows the regression tree is dominated by the other estimators when the underlying function is linear (scenario $a$), additive (sceanrio *b*) or non-linear (scenario *c*). It constantly yields the largest empirical $MSE$ compared to the other $3$ estimators.
+
+**Graph 2b: regression tree vs other estimators in 3-dimensional space**
+
+```{r}
+rm(list = ls())
+set.seed(47)
+n = 100
+nsim = 100
+one.simu.3D <- function(scen = "a", n = 100){
+  # print(n)
+  x <- matrix(runif(n * 3, 0, 1), ncol = 3)
+  x <- x[order(x[,1]), ]
+  
+  if (scen == "a") f = x[,1]+ x[,2] +x[,3]
+  if (scen == "b") f = sin(4*x[,1]) + 2 * sqrt(x[,2]) + exp(x[,3])
+  if (scen == "c") f = (x[,1] * x[,2] * x[,3])^(1/3)
+  
+  y <- f + rnorm(n)
+  
+  yh0 <- predict(rpart(y~x), newdata=as.data.frame(x))
+  yh1 <- lm(y~x)$fitted.values
+  
+  seq.p = seq(2, 5, length = 4) # sequence of bandwidths for NW
+  mse_pl <- sapply(seq.p, function(p.val) {
+    fit.y <- lm(y~poly(x,p.val))$fitted.values
+    mean((fit.y - f)^2)})
+  yh2 <- lm(y~poly(x,seq.p[which.min(mse_pl)]))$fitted.values
+  # print(paste("min poly degree", seq.p[which.min(mse_pl)]))
+  
+  x_t <- t(x)
+  x_l <- split(x_t, rep(1:ncol(x_t), each = nrow(x_t)))
+  seq.h = seq(0.1, 0.5, length = 50) # sequence of bandwidths for NW
+  mse_NW <- sapply(seq.h, function(h.val) {
+    fit.y <- sapply(x_l, function(i) kernesti.regr(i,x,y,h=h.val, kernel="gauss", g=NULL, gernel="gauss", vect=FALSE))
+    mean((fit.y - f)^2)})
+  yh3 <- sapply(x_l, function(i) kernesti.regr(i,x,y,h=seq.h[which.min(mse_NW)], kernel="gauss", g=NULL, gernel="gauss", vect=FALSE))
+  #print(paste("min width", seq.h[which.min(mse_NW)]))
+  mse <- colMeans( (cbind(yh0, yh1,yh2,yh3) - f)^2 )
+}
+
+dat <- lapply(c("a", "b", "c"), function(i) {
+  all.mse <- replicate(nsim, one.simu.3D(n, scen = i)) 
+  data.frame("MSE" = as.numeric(all.mse),
+             "Method" = rep(c("Regression tree","Simple linear", "Poly Deg","NW-Gaussian"), nsim),
+             "Scenario" = paste("Scenario", i))
+})
+dat2 <- do.call(rbind, dat)
+dat2$"Method" <- factor(dat2$"Method", levels = c("Regression tree","Multivaraite linear", "Poly Deg","NW-Gaussian"))
+ggplot(dat2, mapping = aes(y = MSE, color = Method)) +
+  geom_boxplot() + facet_wrap(~Scenario, scales = "free") + theme(axis.title.x = element_blank(), axis.text.x = element_blank()) + scale_y_log10() 
+# + ggtitle("Graph 2b: regression tree vs other estimators (x in R3)")
+```
+
+### 2.3 Simulation in high-dimensional space
+The third simulation example generates $n = 100$ observations with $X \in {\rm I\!R}_{100}$. $x_p \stackrel{i.i.d.}\sim Uniform (0, 1)$, $p = 1, 2, ... 100$. Functions are listed below:
+$$(a) \ f(x_1, x_2,..., x_{100}) = \sum_{p = 1}^{100}x_p$$
+$$(b) \ f(x_1, x_2,..., x_{100}) = \left( \prod_{p = 1}^{100} x_p \right) ^{\frac{1}{100}}$$
+$$(c) \ f(x_1, x_2,..., x_{100}) \stackrel{i.i.d.}\sim N(0.5, 0.1)$$
+
+In this round, regression tree is compared to multivariate linear regression and Nadaraya-Watson with a 'gaussian' kernel (bandwidth chosen with cross-validation). 
+
+**Graph 2c** shows in sceanrio *a* that when the generating mechanism for $y$ is linear, regression tree is surpassed by the other two estimators. When $f(x_1, x_2,..., x_{100})$ is more complicated as in scenario *b* and *c*, while regression tree is still defeated by Nadaraya-Watson with a 'gaussian' kernel, it at least outperforms linear regression for the first time.
+
+In the opening section, we state that the regression tree model is simple and intuitive to follow. However, from the three simulation examples, we observe the disappointing performance of regression tree. It seems like the model is too simple to work nicely: compared to other estimators, it models $y$ less accurately. 
+
+**Graph 2c: regression tree vs other estimators in high-dimensional space**
+
+```{r}
+rm(list = ls())
+set.seed(47)
+n = 100
+nsim = 100
+one.simu.100D <- function(scen, n){
+  # print(n); print(scen)
+  x <- matrix(runif(n * 100, 0,1), ncol = 100)
+  x <- x[order(x[,1]), ]
+  
+  if (scen == "a") f = apply(x, 1, sum)
+  if (scen == "b") f = apply(x, 1, prod) ^ (1/100)
+  if (scen == "c") f = rnorm(100, 0.5, 0.1)
+  y <- f + rnorm(n)
+  
+  yh0 <- predict(rpart(y~x), newdata=as.data.frame(x))
+  yh1 <- lm(y~x)$fitted.values
+  
+  x_t <- t(x)
+  x_l <- split(x_t, rep(1:ncol(x_t), each = nrow(x_t)))
+  seq.h = seq(1,5, length = 50) # sequence of bandwidths for NW
+  mse_NW <- sapply(seq.h, function(h.val) {
+    fit.y <- sapply(x_l, function(i) kernesti.regr(i,x,y,h=h.val, kernel="gauss", g=NULL, gernel="gauss", vect=FALSE))
+    mean((fit.y - f)^2)})
+  # print(paste("min width", seq.h[which.min(mse_NW)]))
+  yh2 <- sapply(x_l, function(i) kernesti.regr(i,x,y,h=seq.h[which.min(mse_NW)], kernel="gauss", g=NULL, gernel="gauss", vect=FALSE))
+  colMeans( (cbind(yh0, yh1, yh2) - f)^2 )
+}
+
+dat <- lapply(c("a", "b", "c"), function(i) {
+  all.mse <- replicate(nsim, one.simu.100D(100, scen = i)) 
+  data.frame("MSE" = as.numeric(all.mse),
+             "Method" = rep(c("Regression tree","Multivaraite linear", "NW-Gaussian"), nsim),
+             "Scenario" = paste("Scenario", i))
+})
+
+dat2 <- do.call(rbind,dat)
+dat2$"Method" <- factor(dat2$"Method", levels = c("Regression tree","Simple linear", "NW-Gaussian"))
+ggplot(dat2, mapping = aes(y = MSE, color = Method)) +
+  geom_boxplot() + facet_wrap(~Scenario, scales = "free") + theme(axis.title.x = element_blank(), axis.text.x = element_blank()) + scale_y_log10()
+# + ggtitle("Graph 2c: regression tree vs other estimators (x in R100)")
+```
+
+# 3 Pruning
+In this section, we evaluate regression tree model from a prediction problem perspective and introduce an important component of the model: pruning. 
+
+As mentioned in the second section of this report, we can theoratically build a *full* regression tree such that each terminal node only contains very few observations. Although this tree gives us an unbiased estimateof the current sample, it is overfitting the data. The regression tree built under this fashion also has large variance: it can change drastically when modeled on different samples from the same population. 
+
+At the cost of increasing bias of the estimator but to avoid overfitting and to decrease variance of the tree model, we want a more flexible tree. There are multiple ways to do so: we can stop splitting nodes when the number of data points in a node falls below $10$ percent of the entire sample. We can continue branching only if doing so will decrease *RSS* by a certain number. This method is not ideal because a node that does not pass the threshold to be further splitted in the early stage coul lead to large decrease in *RSS* later on. 
+
+Another way is to do the opposite: we grow a full tree first, and then prune it back to a smaller subtree by collapsing some nodes, hoping for a low *test error*. However, this method can be rather clumsy if we have a large full tree to begin with and we will need to consider every possible subtrees. To address this issue, we commonly adopt the *cost-complexity pruning* method which narrows down the range of subtree for consideration by introducing a tuning parameter: $\alpha$. The general idea is to penalize complicated trees with large number of terminal nodes.
+
+We first consider a range of $\alpha$ values to test. For a given $\alpha$, the goal is to find a subtree with $\tilde{M}_\alpha$ terminal nodes, such that this tree has the *minimal cost-complexity value*:
+  $$C_\alpha (\tilde{M}_\alpha) = \sum_{m = 1}^{\tilde{M}_\alpha} \sum_{x_i \in R_{m}} (y_i - \hat{c}_{m})^ 2 + \alpha \tilde{M}_\alpha$$
+
+It turns out that the corresponding best pruned subtree for increasing $\alpha$ will be nested and predictable as illustrated in **Graph 3**. From left to right and top to bottom, we increase $\alpha$ and see a sequence of nested pruned trees. The first row in each node indicates the predicted value $\hat{c}_m$ and the second row shows the percentage of the sample that falls into the node. When $\alpha = 0$ (the top-left graph), the best tree with the *minimal cost-complexity value* is the original full tree with $6$ terminal nodes. When $\alpha$ increases, we collapse the terminal nodes from the full tree with the smallest increase in $\sum_{m} \sum_{x_i \in R_{m}} (y_i - \hat{c}_{m})^2$ to get a subtree. As we continue increasing $\alpha$, we collapse the new terminal nodes in the subtree (originally internal nodes) to a even smaller subtree. The best pruned tree selected for each $\alpha$ with the minimal $C_\alpha (\tilde{M}_\alpha)$ will then have fewer terminal nodes and is a subtree of the  previous pruned subtree. Although the pruned tree has worse fit on the sample, it performs better at predicting future data set. When $\alpha$ gets really large, we are left with one *single* node (the bottom-right one) which is the root from the original full tree.
+
+**Graph 3: A sequence of nested pruned trees**
+
+```{r, results='hide'}
+rm(list = ls())
+set.seed(1048)
+x1 <- rnorm(100, 10, 5)
+x2 <- runif(100, 0, 10)
+y = 5 * x1 + x2 ^ 2 + rnorm(100, 0, 1)
+mod2 <- rpart(y ~ x1 + x2, method = "anova", control = rpart.control(cp = 0))
+
+# par(mfrow=c(1,1)) 
+# rpart.plot(mod2, main = "Graph 3a: full regression tree \u03b1 = 0")
+# plotcp(mod2, main = "Graph 3b: full regression tree \u03b1 = 0")
+
+cp.list <- sort(mod2$cptable[, "CP"])
+
+par(mfrow=c(length(cp.list)/2,2)) 
+lapply(cp.list, function(i){
+  mod2.prune = prune(mod2, cp =i, type = 0)
+  rpart.plot(mod2.prune)
+})
+```
+
+After we grow a sequence of subtree indexed by a range of $\alpha$ values, the best $\alpha$ is picked through cross-validation, similar to choosing the optimal bandwitdth for Nadaraya-Watson with a “gaussian” kernel. The data will be splitted into $K$ folds and a range of $\alpha$ values will be considered for the pruning. For $k = 1, 2, ..., K$, use data from every other $k-1$ folds except for the $k$th fold as the training set and the $k$th fold is be held out as the cross-validation fold. Among the *training set*, we build a sequence of trees corresponding to the sequence of $\alpha$ values and use these trees to predict on the *cross-validation set* and calculated their *RSS*. Each $\alpha$ value wil then be associated with $K$ regression trees and consequently $K$ RSS results. We then choose the $\alpha$ associated with the smallest average *RSS* as the tuning parameter for our model. 
+
+# 3.1 Simulation to compare training and test error
+
+To confirm if pruning helps regression tree do a better job at predicting, the study includes another simulation with $X \in {\rm I\!R}_{100}$. $n = 1000$ observations are generated and are radomly splitted into a *training set* and *test set* evenly. The scenarios tested here correspond to the same three functions as in the second section:
+  
+$$(a) \ f(x_1, x_2,..., x_{100}) = \sum_{p = 1}^{100}x_p$$
+$$(b) \ f(x_1, x_2,..., x_{100}) = \left( \prod_{p = 1}^{100} x_p \right) ^{\frac{1}{100}}$$
+$$(c) \ f(x_1, x_2,..., x_{100}) \sim Normal(0.5, 0.1)$$
+  
+In **Graph 4**, x-axis corresponds to the number of terminal nodes in the regression trees. We observe that in any scenario, with bigger and more complicated trees, the training error is small but the test error is really large. If we prune the tree to be smaller, we observe a drop in test error as we expect.
+
+**Graph 4: Test error vs training error**
+
+```{r}
+rm(list = ls())
+set.seed(47)
+n = 500
+nsim = 100
+one.simu.100D.v3 <- function(scen, n){
+  x <- matrix(runif(n * 100, 0,1), ncol = 100)
+  x <- x[order(x[,1]), ]
+  
+  if (scen == "a") f = apply(x, 1, sum)
+  if (scen == "b") f = apply(x, 1, prod) ^ (1/100)
+  if (scen == "c") f = rnorm(100, 0.5, 0.1)
+  y <- f + rnorm(n)
+  dat <- as.data.frame(cbind(x, y))
+  
+  train = sample(1:nrow(x), nrow(x)/2)
+  train <- sort(train)
+  
+  tree <- rpart(y~., dat, subset = train, method = "anova", control = rpart.control(cp = 0))
+  # yh0.train <- predict(tree, newdata = dat[train,])
+  # yh0.test <- predict(tree, newdata = dat[-train,])
+  
+  cp.list <- tree$cptable[, "CP"]
+  size.list <- tree$cptable[, "nsplit"] +1
+  yh1 <- lapply(cp.list, function(i){
+    tree.prune = prune(tree, cp =i, type = 0)
+    yh0.train <- predict(tree.prune, newdata = dat[train,])
+    yh0.test <- predict(tree.prune, newdata = dat[-train,])
+    cbind(mean((yh0.train - dat[train,]$y)^2), mean((yh0.test - dat[-train,]$y)^2))
+  })
+  
+  yh2 <- do.call(rbind, yh1)
+  yh3 <- as.data.frame(as.numeric(yh2))
+  yh3$Size <- rep(size.list, 2)
+  yh3$Type <- rep(c("Training error", "Test error"), each = length(size.list))
+  return(yh3)
+}
+t1 <- one.simu.100D.v3("a", n = 100)
+t1$Scenario = "Scenario A"
+t2 <- one.simu.100D.v3(scen = "b", n)
+t2$Scenario = "Scenario B"
+t3 <- one.simu.100D.v3(scen = "c", n)
+t3$Scenario = "Scenario C"
+t <- rbind(t1, t2, t3)
+colnames(t) <- c("MSE", "Size", "Type", "Scenario")
+ggplot(t, mapping = aes(x = Size, y = MSE, col = Type, linetype = Type)) + geom_line() + facet_wrap(~Scenario, scales = "free") + xlab("Tree size") + ylab("Error") + scale_x_reverse()
+```
+
+# 3.2 Simulation to evaluate pruned regression tree 
+To evaluate the performance of pruned tree against other estimators, the study uses another simulation example to compare the performance of a fully grown tree, a pruned tree and simple linear estimator in terms of *test error*. The optimal $\alpha$ for the pruned tree is determined by cross-validation on the training set as described before. It is confirmed in **Graph 5** that the pruned tree consistently outperforms full tree in terms of test error though it has larger training error. While full tree fails to outperform linear regression, pruned tree does a better job than multivariate linear model at predicting test data in scenario *b* and *c* when the undelying function is not linear. 
+
+**Graph 5: Pruned regression tree vs other estimators in high-dimensional space**
+
+```{r}
+rm(list = ls())
+set.seed(47)
+n = 1000
+nsim = 100
+one.simu.100D.v2 <- function(scen, n){
+  x <- matrix(runif(n * 100, 0,1), ncol = 100)
+  x <- x[order(x[,1]), ]
+  
+  if (scen == "a") f = apply(x, 1, sum)
+  if (scen == "b") f = apply(x, 1, prod) ^ (1/100)
+  if (scen == "c") f = rnorm(100, 0.5, 0.1)
+  y <- f + rnorm(n)
+  dat <- as.data.frame(cbind(x, y))
+  
+  train = sample(1:nrow(x), nrow(x)/2)
+  train <- sort(train)
+  
+  tree <- rpart(y~., dat, subset = train)
+  yh0.train <- predict(tree, newdata = dat[train,])
+  yh0.test <- predict(tree, newdata = dat[-train,])
+  
+  min_err <- tree$cptable[which.min(tree$cptable[,'xerror']), "CP"]
+  prune.tree <- prune(tree, cp = min_err)
+  # plot(prune.tree)
+  yh1.train <- predict(prune.tree, newdata = dat[train,])
+  yh1.test <- predict(prune.tree, newdata = dat[-train,])
+  
+  l <- lm(y~., dat, subset = train)
+  yh2.train <- predict.lm(l, newdata = dat[train,])
+  yh2.test <- predict.lm(l, newdata = dat[-train,])
+  
+  cbind(mean((yh0.train - dat[train,]$y)^2), 
+        mean((yh0.test - dat[-train,]$y)^2),
+        mean((yh1.train - dat[train,]$y)^2), 
+        mean((yh1.test - dat[-train,]$y)^2),
+        mean((yh2.train - dat[train,]$y)^2), 
+        mean((yh2.test - dat[-train,]$y)^2))
+}
+dat <- lapply(c("a", "b", "c"), function(i) {
+  all.mse <- replicate(nsim, one.simu.100D.v2(n, scen = i)) 
+  data.frame("MSE" = as.numeric(all.mse),
+             "Method" = rep(c("Regression tree",
+                              "Pruned regression tree",
+                              "Multivaraite linear"), each = 2, nsim * 2),
+             "Type" = rep(c("Training error", "Test error"
+             ), nsim * 3),
+             "Scenario" = paste("Scenario", i))
+})
+dat2 <- do.call(rbind,dat)
+dat2$"Method" <- factor(dat2$"Method", levels = c("Regression tree", "Pruned regression tree", "Simple linear"))
+dat2$"Type" <- factor(dat2$"Type", levels = c("Test error", "Training error"))
+ggplot(dat2, mapping = aes(y = MSE, color = Method, linetype = Type)) +
+  geom_boxplot() + facet_wrap(~Scenario, scales = "free") + theme(axis.title.x = element_blank(), axis.text.x = element_blank()) + scale_y_log10() + ylab("Error")
+```
+
+## 4 Conclusion
+In this study, we learn about the basic regression tree model using a few simulation examples. Although a regression tree is easy-to-interpret, its accuracy in modeling $y$ is not as good when compared to some other estimators such as the Nadaraya-Watson with a 'gaussian' kernel. We can build a large regression tree with fewer observations in each terminal node to *increase accuracy* and *reduce bias*, but that approach risks the tree being over-complicated and overfitting the data. Instead, we can make the tree more flexible through *cost-complexity pruning* method to boost its performance in predicting future events.
+
+## 5 References
+[1] James, Gareth, et al. *An introduction to statistical learning*. Vol. 112. New York: springer, 2013.
+
+[2] Friedman, Jerome, Trevor Hastie, and Robert Tibshirani. *The elements of statistical learning.* Vol. 1. No. 10. New York: Springer series in statistics, 2001.
+
+[3] CMU statistics. *Classification and Regression Trees.* 2009.  https://www.stat.cmu.edu/~cshalizi/350/lectures/22/lecture-22.pdf (accessed May 20, 2020)
+
+[4] Milborrow, Stephen. *Plotting rpart trees with the rpart.plot package.* 2018. http://www.milbo.org/rpart-plot/prp.pdf (accessed May 23, 2020)
+
